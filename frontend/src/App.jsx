@@ -4,7 +4,7 @@ import CandidateTable from './components/CandidateTable'
 import CandidateDetail from './components/CandidateDetail'
 import DashboardCharts from './components/DashboardCharts'
 
-const API = 'http://localhost:8000'
+const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
 export default function App() {
   const [candidates, setCandidates] = useState([])
