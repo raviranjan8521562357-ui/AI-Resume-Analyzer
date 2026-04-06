@@ -45,23 +45,44 @@ export default function UploadSection({ onAnalysisComplete, setError }) {
     try {
       // Clear previous candidates to prevent duplicates from accumulation
       setProgress('Preparing...')
-      await fetch(`${API}/candidates`, { method: 'DELETE' })
+      try {
+        await fetch(`${API}/candidates`, { method: 'DELETE' })
+      } catch (clearErr) {
+        // If clearing fails, backend may be down — continue and let the upload catch it
+        console.warn('Could not clear candidates:', clearErr.message)
+      }
 
       setProgress('Uploading resumes...')
       const formData = new FormData()
       files.forEach(f => formData.append('files', f))
-      const upRes = await fetch(`${API}/upload-multiple`, { method: 'POST', body: formData })
-      if (!upRes.ok) throw new Error((await upRes.json()).detail || 'Upload failed')
+      let upRes
+      try {
+        upRes = await fetch(`${API}/upload-multiple`, { method: 'POST', body: formData })
+      } catch (networkErr) {
+        throw new Error(`Cannot connect to backend at ${API}. Please check that the backend is running and CORS is configured.`)
+      }
+      if (!upRes.ok) {
+        const errBody = await upRes.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Upload failed (HTTP ${upRes.status})`)
+      }
       const upData = await upRes.json()
       if (upData.uploaded === 0) throw new Error('No resumes could be processed.')
 
       setProgress(`Analyzing ${upData.uploaded} resume${upData.uploaded > 1 ? 's' : ''} with AI...`)
-      const aRes = await fetch(`${API}/analyze-batch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_description: jd }),
-      })
-      if (!aRes.ok) throw new Error((await aRes.json()).detail || 'Analysis failed')
+      let aRes
+      try {
+        aRes = await fetch(`${API}/analyze-batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_description: jd }),
+        })
+      } catch (networkErr) {
+        throw new Error(`Connection lost during analysis. Please check your backend at ${API}.`)
+      }
+      if (!aRes.ok) {
+        const errBody = await aRes.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Analysis failed (HTTP ${aRes.status})`)
+      }
       const results = await aRes.json()
       onAnalysisComplete(results.candidates)
       setFiles([])

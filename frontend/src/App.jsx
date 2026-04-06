@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import UploadSection from './components/UploadSection'
 import CandidateTable from './components/CandidateTable'
 import CandidateDetail from './components/CandidateDetail'
@@ -11,6 +11,21 @@ export default function App() {
   const [chartCandidate, setChartCandidate] = useState(null)    // For skill breakdown charts
   const [detailCandidate, setDetailCandidate] = useState(null)  // For slide-in detail panel
   const [error, setError] = useState(null)
+
+  // Health check: verify backend is reachable on mount
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch(`${API}/`, { signal: controller.signal })
+      .then(res => {
+        if (!res.ok) setError(`Backend returned HTTP ${res.status}. Check your Render deployment.`)
+      })
+      .catch(err => {
+        if (err.name !== 'AbortError') {
+          setError(`Cannot reach backend at ${API}. It may be starting up (Render free tier can take ~30s). Please wait and refresh.`)
+        }
+      })
+    return () => controller.abort()
+  }, [])
 
   // Charts show: explicitly selected candidate → or first candidate as default
   const activeCandidate = chartCandidate || (candidates.length > 0 ? candidates[0] : null)
