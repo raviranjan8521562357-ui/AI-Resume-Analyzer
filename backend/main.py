@@ -282,32 +282,12 @@ app = FastAPI(
 )
 
 # --- CORS Configuration ---
-# Allow the deployed Vercel frontend + local dev origins
-# FRONTEND_URL env var can be set on Render for additional origins
-_allowed_origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",
-    "https://ai-resume-analyzer-sage-tau.vercel.app",
-]
-
-# Add production frontend URL from environment variable
-_frontend_url = os.getenv("FRONTEND_URL", "")
-if _frontend_url:
-    _allowed_origins.append(_frontend_url.rstrip("/"))
-
-# Also support comma-separated CORS_ORIGINS for multiple domains
-_cors_origins = os.getenv("CORS_ORIGINS", "")
-if _cors_origins:
-    for origin in _cors_origins.split(","):
-        origin = origin.strip().rstrip("/")
-        if origin and origin not in _allowed_origins:
-            _allowed_origins.append(origin)
-
+# Allow all origins so Vercel frontend can reach the Render backend
+# without needing exact URL matching in environment variables.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

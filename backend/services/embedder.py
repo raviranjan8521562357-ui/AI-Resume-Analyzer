@@ -1,9 +1,17 @@
 """
-Embedding and similarity search using sentence-transformers + FAISS.
+Embedding and similarity search using sentence-transformers.
+Uses FAISS if available, otherwise falls back to numpy-based search.
 """
 import numpy as np
-import faiss
 from sentence_transformers import SentenceTransformer
+
+# Try to import faiss; fall back to numpy if not available (e.g. on Render)
+try:
+    import faiss
+    _HAS_FAISS = True
+except ImportError:
+    _HAS_FAISS = False
+    print("WARNING: faiss not available — using numpy fallback for vector search")
 
 # Singleton model instance — loaded once, reused across requests
 _model = None
@@ -37,34 +45,54 @@ def compute_similarity(text_a: str, text_b: str) -> float:
     return float(similarity)
 
 
-def build_index(chunks: list[str]) -> tuple[faiss.Index, list[str]]:
+# ─── Numpy fallback for FAISS ───
+
+class _NumpyIndex:
+    """Simple brute-force L2 search using numpy (FAISS fallback)."""
+    def __init__(self, embeddings: np.ndarray):
+        self.embeddings = embeddings
+
+    def search(self, query: np.ndarray, k: int):
+        # L2 distances
+        diffs = self.embeddings - query  # (n, d)
+        dists = np.sum(diffs ** 2, axis=1)  # (n,)
+        k = min(k, len(dists))
+        indices = np.argsort(dists)[:k]
+        distances = dists[indices]
+        return np.array([distances]), np.array([indices])
+
+
+def build_index(chunks: list[str]):
     """
-    Build a FAISS index from text chunks.
+    Build a search index from text chunks.
+    Uses FAISS if available, otherwise numpy fallback.
     
     Args:
         chunks: List of text chunks to index
     
     Returns:
-        Tuple of (FAISS index, original chunks list)
+        Tuple of (index, original chunks list)
     """
     model = get_model()
     embeddings = model.encode(chunks)
     embeddings = np.array(embeddings).astype('float32')
     
-    # Create FAISS index (L2 distance)
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)
-    index.add(embeddings)
+    if _HAS_FAISS:
+        dimension = embeddings.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(embeddings)
+    else:
+        index = _NumpyIndex(embeddings)
     
     return index, chunks
 
 
-def search_index(index: faiss.Index, chunks: list[str], query: str, top_k: int = 3) -> list[str]:
+def search_index(index, chunks: list[str], query: str, top_k: int = 3) -> list[str]:
     """
-    Search the FAISS index for chunks most similar to the query.
+    Search the index for chunks most similar to the query.
     
     Args:
-        index: FAISS index
+        index: FAISS or numpy index
         chunks: Original text chunks
         query: Search query
         top_k: Number of results to return
