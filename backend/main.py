@@ -6,7 +6,9 @@ import uuid
 import hashlib
 import os
 import re as _re
+import threading
 from datetime import datetime
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -274,11 +276,33 @@ def compute_profile_fit(analysis: dict, candidate_info: dict, job_description: s
         "weights": _WEIGHTS,
     }
 
+# --- Pre-warm heavy dependencies in background after server starts ---
+def _warmup():
+    """Load embedding model in a background thread so first request is fast."""
+    try:
+        print("[warmup] Pre-loading embedding model in background...")
+        from services.embedder import get_model
+        get_model()
+        print("[warmup] Model ready!")
+    except Exception as e:
+        print(f"[warmup] Failed (will retry on first request): {e}")
+
+
+@asynccontextmanager
+async def lifespan(app):
+    # Startup: kick off model loading in a background thread
+    thread = threading.Thread(target=_warmup, daemon=True)
+    thread.start()
+    yield
+    # Shutdown: nothing to clean up
+
+
 # --- App Setup ---
 app = FastAPI(
     title="Resume ATS HR Dashboard",
     description="AI-powered multi-resume screening & ranking system",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 # --- CORS Configuration ---

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, useEffect } from 'react'
 
 const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -7,7 +7,26 @@ export default function UploadSection({ onAnalysisComplete, setError }) {
   const [jd, setJd] = useState('')
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState('')
+  const [elapsed, setElapsed] = useState(0)
   const inputRef = useRef(null)
+  const timerRef = useRef(null)
+
+  // Elapsed time counter during loading
+  useEffect(() => {
+    if (loading) {
+      setElapsed(0)
+      timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000)
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current)
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current) }
+  }, [loading])
+
+  const formatTime = (s) => {
+    const m = Math.floor(s / 60)
+    const sec = s % 60
+    return m > 0 ? `${m}m ${sec}s` : `${sec}s`
+  }
 
   const handleFiles = (newFiles) => {
     const valid = Array.from(newFiles).filter(f => {
@@ -99,8 +118,17 @@ export default function UploadSection({ onAnalysisComplete, setError }) {
     return (
       <div className="loading-state">
         <div className="spinner-lg" />
-        <p>{progress}</p>
-        <p className="loading-sub">This may take a moment for multiple resumes</p>
+        <p style={{ fontSize: '1.1rem', fontWeight: 600 }}>{progress}</p>
+        <p style={{ color: 'var(--accent)', fontFamily: 'monospace', fontSize: '1rem' }}>
+          ⏱ {formatTime(elapsed)}
+        </p>
+        <p className="loading-sub" style={{ maxWidth: '360px', textAlign: 'center', lineHeight: 1.5 }}>
+          {elapsed < 15
+            ? 'Uploading and preparing AI models...'
+            : elapsed < 45
+            ? 'AI is analyzing the resume — this takes 30-60s on the free tier...'
+            : 'Still processing — Render free tier can be slow on first use. Hang tight!'}
+        </p>
       </div>
     )
   }

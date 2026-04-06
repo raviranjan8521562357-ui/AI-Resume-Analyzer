@@ -42,7 +42,7 @@ def _call_llm(messages: list[dict], max_tokens: int = 2048) -> str:
     last_error = None
 
     for model in MODELS:
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 payload = {
                     "model": model,
@@ -55,7 +55,7 @@ def _call_llm(messages: list[dict], max_tokens: int = 2048) -> str:
                     HF_API_URL,
                     headers=headers,
                     json=payload,
-                    timeout=35,
+                    timeout=25,
                 )
 
                 if response.status_code == 200:
@@ -72,8 +72,8 @@ def _call_llm(messages: list[dict], max_tokens: int = 2048) -> str:
 
                 # Rate limit or overloaded — retry with backoff
                 if status in (429, 503, 500):
-                    wait = 5 * (attempt + 1)
-                    print(f"[{model}] HTTP {status} (attempt {attempt+1}/3). Waiting {wait}s...")
+                    wait = 3 * (attempt + 1)
+                    print(f"[{model}] HTTP {status} (attempt {attempt+1}/2). Waiting {wait}s...")
                     time.sleep(wait)
                     continue
 
@@ -82,8 +82,8 @@ def _call_llm(messages: list[dict], max_tokens: int = 2048) -> str:
                 break
 
             except requests.exceptions.Timeout:
-                wait = 5 * (attempt + 1)
-                print(f"[{model}] Timeout (attempt {attempt+1}/3). Waiting {wait}s...")
+                wait = 3 * (attempt + 1)
+                print(f"[{model}] Timeout (attempt {attempt+1}/2). Waiting {wait}s...")
                 time.sleep(wait)
                 continue
             except Exception as e:
