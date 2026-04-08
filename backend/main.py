@@ -494,6 +494,23 @@ async def analyze_batch(request: BatchAnalyzeRequest):
             })
 
         except Exception as e:
+            import traceback
+            print(f"[ERROR] Analysis failed for {candidate['filename']}: {type(e).__name__}: {e}")
+            traceback.print_exc()
+
+            # Provide basic fallback info so frontend still shows something
+            fallback_info = {
+                "candidate_name": candidate["filename"].replace(".pdf", "").replace(".docx", "").replace("_", " ").replace("-", " "),
+                "email": None,
+                "phone": None,
+                "skills": [],
+                "projects": [],
+                "internships": [],
+                "experience_level": "Entry Level",
+                "education": None,
+                "total_experience_years": 0,
+            }
+
             results.append({
                 "id": cid,
                 "filename": candidate["filename"],
@@ -502,12 +519,20 @@ async def analyze_batch(request: BatchAnalyzeRequest):
                     "ats_score": 0,
                     "match_percentage": 0,
                     "decision": "Error",
-                    "explanation": str(e),
+                    "explanation": f"Analysis failed: {str(e)[:200]}. Please try again.",
                     "matched_skills": [],
                     "missing_skills": [],
                     "similarity_score": 0
                 },
-                "candidate_info": None,
+                "candidate_info": fallback_info,
+                "profile_fit": {
+                    "technical": {"score": 0, "explanation": "Analysis error"},
+                    "project_quality": {"score": 0, "explanation": "Analysis error"},
+                    "experience": {"score": 0, "explanation": "Analysis error"},
+                    "soft_skills": {"score": 0, "explanation": "Analysis error"},
+                    "composite_score": 0,
+                    "weights": _WEIGHTS,
+                },
                 "error": str(e)
             })
 

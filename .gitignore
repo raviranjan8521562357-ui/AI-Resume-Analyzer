@@ -4,3 +4,8 @@ node_modules/
 __pycache__/
 venv/
 .venv/
+frontend/dist/
+temp_main.py
+temp_main_utf8.py
+diff_stat.txt
+*.pyc

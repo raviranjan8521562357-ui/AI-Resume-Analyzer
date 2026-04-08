@@ -33,7 +33,7 @@ def _get_headers() -> dict:
     }
 
 
-def _call_llm(messages: list[dict], max_tokens: int = 2048) -> str:
+def _call_llm(messages: list[dict], max_tokens: int = 4000) -> str:
     """
     Call HuggingFace router API with model fallback + retry.
     Uses OpenAI-compatible chat completions format.
@@ -42,25 +42,30 @@ def _call_llm(messages: list[dict], max_tokens: int = 2048) -> str:
     last_error = None
 
     for model in MODELS:
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 payload = {
                     "model": model,
                     "messages": messages,
                     "max_tokens": max_tokens,
-                    "temperature": 0.3,
+                    "temperature": 0.2,
                     "top_p": 0.9,
                 }
                 response = requests.post(
                     HF_API_URL,
                     headers=headers,
                     json=payload,
-                    timeout=25,
+                    timeout=90,
                 )
 
                 if response.status_code == 200:
                     data = response.json()
-                    return data["choices"][0]["message"]["content"].strip()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    if not content:
+                        print(f"[{model}] Empty response (attempt {attempt+1}/3)")
+                        time.sleep(2)
+                        continue
+                    return content
 
                 error_text = response.text
                 status = response.status_code
@@ -71,24 +76,26 @@ def _call_llm(messages: list[dict], max_tokens: int = 2048) -> str:
                     break
 
                 # Rate limit or overloaded — retry with backoff
-                if status in (429, 503, 500):
-                    wait = 3 * (attempt + 1)
-                    print(f"[{model}] HTTP {status} (attempt {attempt+1}/2). Waiting {wait}s...")
+                if status in (429, 503, 500, 502):
+                    wait = 5 * (attempt + 1)
+                    print(f"[{model}] HTTP {status} (attempt {attempt+1}/3). Waiting {wait}s...")
                     time.sleep(wait)
                     continue
 
                 # Other error
-                print(f"[{model}] HTTP {status}: {error_text[:100]}")
+                print(f"[{model}] HTTP {status}: {error_text[:200]}")
+                last_error = ValueError(f"HTTP {status}: {error_text[:200]}")
                 break
 
             except requests.exceptions.Timeout:
-                wait = 3 * (attempt + 1)
-                print(f"[{model}] Timeout (attempt {attempt+1}/2). Waiting {wait}s...")
+                wait = 5 * (attempt + 1)
+                print(f"[{model}] Timeout (attempt {attempt+1}/3). Waiting {wait}s...")
+                last_error = TimeoutError(f"{model} timed out")
                 time.sleep(wait)
                 continue
             except Exception as e:
                 last_error = e
-                print(f"[{model}] Error: {str(e)[:100]}")
+                print(f"[{model}] Error: {str(e)[:200]}")
                 break
 
     raise ValueError(f"All HuggingFace models failed. Last error: {last_error}")
@@ -135,13 +142,13 @@ def analyze_resume(resume_text: str, job_description: str, similarity_score: flo
     Returns a combined dict with ATS score, match %, decision, explanation, skills, and candidate profile.
     """
     # Use generous limits so projects/internships at the end aren't cut off
-    resume_truncated = resume_text[:5000]
+    resume_truncated = resume_text[:6000]
     jd_truncated = job_description[:1500]
 
     messages = [
         {
             "role": "system",
-            "content": "You are an expert ATS (Applicant Tracking System) analyzer and resume parser. You always respond with ONLY valid JSON, no explanations before or after the JSON object."
+            "content": "You are an expert ATS (Applicant Tracking System) analyzer and resume parser. You always respond with ONLY valid JSON, no explanations before or after the JSON object. Never add any text outside the JSON."
         },
         {
             "role": "user",
@@ -159,7 +166,7 @@ IMPORTANT EXTRACTION RULES:
 - If the resume has 2 work experiences (e.g. 1 full-time + 1 internship), the work_experience array MUST have 2 objects. NEVER merge or skip.
 - Count the roles in the resume's Work Experience section. Your work_experience array MUST have the same count.
 
-Respond with ONLY valid JSON in this exact format (no other text):
+Respond with ONLY this JSON (no other text before or after):
 {{
     "ats_score": <number 0-100>,
     "match_percentage": <number 0-100>,
@@ -180,18 +187,10 @@ Respond with ONLY valid JSON in this exact format (no other text):
     ],
     "work_experience": [
         {{
-            "company": "<company 1>",
+            "company": "<company name>",
             "role": "<role title>",
-            "experience_type": "Full-time",
-            "duration": "Oct 2025 - Present",
-            "work_done": ["<bullet 1>", "<bullet 2>", "<bullet 3>"],
-            "technologies_used": ["tech1", "tech2"]
-        }},
-        {{
-            "company": "<company 2>",
-            "role": "<role title>",
-            "experience_type": "Internship",
-            "duration": "Aug 2025 - Sep 2025",
+            "experience_type": "Full-time or Internship",
+            "duration": "Month Year - Month Year",
             "work_done": ["<bullet 1>", "<bullet 2>"],
             "technologies_used": ["tech1", "tech2"]
         }}
@@ -201,32 +200,62 @@ Respond with ONLY valid JSON in this exact format (no other text):
     "total_experience_years": <number or 0>
 }}
 
-CRITICAL RULES:
-1. work_experience MUST be a JSON array with one object per role. The example shows 2 — include ALL roles found, even if more or fewer than 2.
-2. experience_type: "Full-time" for engineer/developer/analyst roles, "Internship" for intern roles.
-3. Include ALL bullet points from each role in work_done (do not summarize).
-4. projects MUST also include every project found.
-
-Scoring guidelines:
-- ats_score: Overall ATS compatibility (keywords, formatting, relevance). Factor in the similarity score.
-- match_percentage: How well the candidate matches the job requirements
-- decision: Accept if ats_score >= 60, else Reject"""
+CRITICAL:
+1. Output ONLY JSON. No markdown, no explanation, no code fences.
+2. work_experience MUST list every role found.
+3. projects MUST list every project found.
+4. experience_type: "Full-time" for jobs, "Internship" for internships.
+5. ats_score >= 60 means Accept, else Reject."""
         }
     ]
 
-    response_text = _call_llm(messages, max_tokens=2500)
-
-    # Debug: log raw response to help diagnose extraction issues
-    print(f"[DEBUG] Raw LLM response for resume (first 500 chars): {response_text[:500]}")
-
+    # Attempt 1: Full analysis
+    result = None
     try:
+        response_text = _call_llm(messages, max_tokens=4000)
+        print(f"[DEBUG] Raw LLM response (first 500 chars): {response_text[:500]}")
         result = _parse_json_response(response_text)
-        # Debug: log how many projects/work experiences were extracted
         proj_count = len(result.get('projects', []))
         we_count = len(result.get('work_experience', result.get('internships', [])))
         print(f"[DEBUG] Extracted {proj_count} projects, {we_count} work experiences")
-    except (json.JSONDecodeError, Exception) as e:
-        print(f"[HF] JSON parse failed: {e}. Using fallback scoring.")
+    except json.JSONDecodeError as e:
+        print(f"[HF] JSON parse failed on attempt 1: {e}")
+    except Exception as e:
+        print(f"[HF] Analysis attempt 1 failed: {type(e).__name__}: {e}")
+
+    # Attempt 2: Retry with simpler prompt if first attempt failed
+    if result is None:
+        try:
+            print("[HF] Retrying with simplified prompt...")
+            simple_messages = [
+                {
+                    "role": "system",
+                    "content": "Output ONLY valid JSON. No other text."
+                },
+                {
+                    "role": "user",
+                    "content": f"""Parse this resume and output JSON with these keys:
+ats_score (0-100), match_percentage (0-100), decision (Accept/Reject), explanation (string),
+matched_skills (array), missing_skills (array), candidate_name (string), email (string/null),
+phone (string/null), skills (array), projects (array of {{name, description, tech}}),
+work_experience (array of {{company, role, experience_type, duration, work_done, technologies_used}}),
+experience_level (string), education (string), total_experience_years (number).
+
+Resume: {resume_truncated[:4000]}
+Job: {jd_truncated[:800]}
+Similarity: {similarity_score:.2f}"""
+                }
+            ]
+            response_text = _call_llm(simple_messages, max_tokens=4000)
+            print(f"[DEBUG] Retry response (first 500 chars): {response_text[:500]}")
+            result = _parse_json_response(response_text)
+            print(f"[DEBUG] Retry succeeded! Projects: {len(result.get('projects', []))}, Experience: {len(result.get('work_experience', []))}")
+        except Exception as e2:
+            print(f"[HF] Retry also failed: {type(e2).__name__}: {e2}")
+
+    # Attempt 3: Use regex-enhanced fallback
+    if result is None:
+        print("[HF] All LLM attempts failed. Using enhanced fallback extraction.")
         result = _build_fallback_analysis(resume_text, job_description, similarity_score)
 
     # Ensure all required keys exist with defaults
@@ -235,57 +264,159 @@ Scoring guidelines:
 
 def _build_fallback_analysis(resume_text: str, job_description: str, similarity_score: float) -> dict:
     """
-    Build a reasonable analysis using similarity score + keyword matching
+    Build a comprehensive analysis using regex-based extraction
     when LLM fails to return valid JSON.
+    Extracts name, email, phone, skills, projects, experience, and education.
     """
     resume_lower = resume_text.lower()
     jd_lower = job_description.lower()
 
-    # Extract skills by simple keyword matching
+    # Extract skills by keyword matching
     common_skills = [
         "python", "java", "javascript", "react", "node.js", "sql", "aws", "docker",
         "kubernetes", "git", "html", "css", "typescript", "mongodb", "postgresql",
         "machine learning", "deep learning", "tensorflow", "pytorch", "flask",
         "django", "fastapi", "spring", "angular", "vue", "c++", "c#", "rust", "go",
         "linux", "azure", "gcp", "redis", "kafka", "graphql", "rest api",
+        "express", "next.js", "tailwind", "sass", "webpack", "vite",
+        "pandas", "numpy", "scikit-learn", "selenium", "jest",
+        "mysql", "sqlite", "firebase", "supabase", "prisma",
+        "langchain", "openai", "hugging face", "nlp", "opencv",
+        "figma", "photoshop", "jira", "postman", "swagger",
     ]
-
+    all_resume_skills = [s for s in common_skills if s in resume_lower]
     jd_skills = [s for s in common_skills if s in jd_lower]
     matched = [s for s in jd_skills if s in resume_lower]
     missing = [s for s in jd_skills if s not in resume_lower]
 
-    # Extract name (first line heuristic)
-    lines = resume_text.strip().split("\n")
-    candidate_name = lines[0].strip() if lines else "Unknown"
-    if len(candidate_name) > 40 or len(candidate_name) < 2:
-        candidate_name = "Unknown"
+    # Extract name (first non-empty line that looks like a name)
+    lines = [l.strip() for l in resume_text.strip().split("\n") if l.strip()]
+    candidate_name = "Unknown"
+    for line in lines[:5]:
+        # Skip lines with emails, phones, URLs, or too long
+        if '@' in line or 'http' in line or len(line) > 50 or len(line) < 2:
+            continue
+        # Skip lines that look like headers
+        if any(kw in line.lower() for kw in ['resume', 'curriculum', 'objective', 'summary', 'profile']):
+            continue
+        # A name is typically 2-4 words, mostly alphabetic
+        words = line.split()
+        if 1 <= len(words) <= 5 and all(w.replace('.', '').replace('-', '').isalpha() for w in words):
+            candidate_name = line
+            break
 
     # Extract email
-    email_match = re.search(r'[\w.-]+@[\w.-]+\.\w+', resume_text)
+    email_match = re.search(r'[\w.+-]+@[\w.-]+\.\w{2,}', resume_text)
     email = email_match.group() if email_match else None
 
     # Extract phone
-    phone_match = re.search(r'[\+]?[\d\s\-\(\)]{10,15}', resume_text)
+    phone_match = re.search(r'(?:\+\d{1,3}[\s-]?)?(?:\(?\d{3}\)?[\s.-]?)?\d{3}[\s.-]?\d{4}', resume_text)
     phone = phone_match.group().strip() if phone_match else None
 
-    score = int(similarity_score * 100)
+    # Extract education
+    education = None
+    edu_patterns = [
+        r'(?:B\.?(?:Tech|E|Sc|S|A)|Bachelor|M\.?(?:Tech|S|Sc|E|A|BA)|Master|Ph\.?D|MBA)[^\n]{5,80}',
+    ]
+    for pat in edu_patterns:
+        edu_match = re.search(pat, resume_text, re.IGNORECASE)
+        if edu_match:
+            education = edu_match.group().strip()
+            break
+
+    # Extract projects using section detection
+    projects = []
+    project_section = re.search(
+        r'(?:projects?|personal projects?|academic projects?)\s*[:\n](.+?)(?=\n(?:experience|work|education|skills|certification|achievement|award|reference|$))',
+        resume_text, re.IGNORECASE | re.DOTALL
+    )
+    if project_section:
+        proj_text = project_section.group(1)
+        # Find project names (lines that look like titles)
+        proj_lines = [l.strip() for l in proj_text.split('\n') if l.strip()]
+        current_proj = None
+        for line in proj_lines:
+            # Project title heuristic: short line, not starting with bullet
+            if not line.startswith(('•', '-', '–', '*', '◦')) and len(line) < 100 and len(line) > 3:
+                if current_proj:
+                    projects.append(current_proj)
+                current_proj = {"name": line.split('|')[0].split('–')[0].strip(), "description": "", "tech": []}
+                # Try to extract tech from the line
+                tech_match = re.search(r'(?:tech|stack|tools?|using)\s*[:\-]\s*(.+)', line, re.IGNORECASE)
+                if tech_match:
+                    current_proj["tech"] = [t.strip() for t in tech_match.group(1).split(',')]
+            elif current_proj and line.startswith(('•', '-', '–', '*', '◦')):
+                desc_text = line.lstrip('•-–*◦ ').strip()
+                if current_proj["description"]:
+                    current_proj["description"] += "; " + desc_text
+                else:
+                    current_proj["description"] = desc_text
+        if current_proj:
+            projects.append(current_proj)
+
+    # Extract work experience using section detection
+    internships = []
+    exp_section = re.search(
+        r'(?:work experience|experience|professional experience|employment|internship)s?\s*[:\n](.+?)(?=\n(?:project|education|skills|certification|achievement|award|reference|$))',
+        resume_text, re.IGNORECASE | re.DOTALL
+    )
+    if exp_section:
+        exp_text = exp_section.group(1)
+        exp_lines = [l.strip() for l in exp_text.split('\n') if l.strip()]
+        current_exp = None
+        for line in exp_lines:
+            # Check if line has a date range (likely a role header)
+            has_date = bool(re.search(r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d{4})', line, re.IGNORECASE))
+            is_bullet = line.startswith(('•', '-', '–', '*', '◦'))
+            if not is_bullet and (has_date or ('|' in line and len(line) < 120)):
+                if current_exp:
+                    internships.append(current_exp)
+                # Parse role/company from the line
+                parts = re.split(r'[|–—]', line)
+                role_company = parts[0].strip() if parts else line
+                duration = parts[-1].strip() if len(parts) > 1 else ""
+                # Try to split role and company
+                rc_parts = re.split(r'\s+at\s+|\s*,\s*|\s+@\s+', role_company, maxsplit=1)
+                role = rc_parts[0].strip()
+                company = rc_parts[1].strip() if len(rc_parts) > 1 else "Unknown"
+                exp_type = "Internship" if "intern" in role.lower() else "Full-time"
+                current_exp = {
+                    "company": company, "role": role, "experience_type": exp_type,
+                    "duration": duration, "work_done": [], "technologies_used": []
+                }
+            elif current_exp and is_bullet:
+                current_exp["work_done"].append(line.lstrip('•-–*◦ ').strip())
+        if current_exp:
+            internships.append(current_exp)
+
+    score = max(25, int(similarity_score * 100))
+    # Boost score if many skills match
+    if len(matched) > 3:
+        score = min(100, score + 10)
+
+    explanation = f"Regex-based fallback analysis: {len(matched)}/{len(jd_skills)} required skills found."
+    if projects:
+        explanation += f" {len(projects)} project(s) detected."
+    if internships:
+        explanation += f" {len(internships)} work experience(s) detected."
+    explanation += f" Similarity: {similarity_score:.2f}."
 
     return {
         "ats_score": score,
         "match_percentage": score,
         "decision": "Accept" if score >= 60 else "Reject",
-        "explanation": f"Fallback analysis: {len(matched)}/{len(jd_skills)} required skills found. Similarity score: {similarity_score:.2f}.",
+        "explanation": explanation,
         "matched_skills": matched,
         "missing_skills": missing,
         "candidate_name": candidate_name,
         "email": email,
         "phone": phone,
-        "skills": matched,
-        "projects": [],
-        "internships": [],
-        "experience_level": "Entry Level",
-        "education": None,
-        "total_experience_years": 0,
+        "skills": all_resume_skills if all_resume_skills else matched,
+        "projects": projects,
+        "internships": internships,
+        "experience_level": "Mid Level" if len(internships) > 1 else "Entry Level",
+        "education": education,
+        "total_experience_years": len(internships),  # rough estimate
     }
 
 
