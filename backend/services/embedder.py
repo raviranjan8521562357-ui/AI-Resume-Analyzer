@@ -9,6 +9,7 @@ If sentence-transformers / local model fails (e.g. OOM on free hosting),
 falls back to HuggingFace Inference API for embeddings.
 """
 import os
+import threading
 import requests as _requests
 from dotenv import load_dotenv
 
@@ -21,6 +22,7 @@ _HAS_FAISS = None
 _SentenceTransformer = None
 _model = None
 _USE_API_FALLBACK = False  # True when local model can't load
+_import_lock = threading.Lock()  # Thread safety for lazy imports
 
 
 def _ensure_numpy():
@@ -33,36 +35,44 @@ def _ensure_numpy():
 
 
 def _ensure_imports():
-    """Lazy-load heavy dependencies on first use, not at import time."""
+    """Lazy-load heavy dependencies on first use, not at import time.
+    Thread-safe: uses a lock to prevent race conditions during import."""
     global _np, _faiss, _HAS_FAISS, _SentenceTransformer, _USE_API_FALLBACK
 
-    if _np is not None:
-        return  # Already imported
+    # Quick check without lock — if everything is already loaded
+    if _np is not None and (_SentenceTransformer is not None or _USE_API_FALLBACK):
+        return
 
-    import numpy as np
-    _np = np
+    with _import_lock:
+        # Re-check inside lock (double-checked locking pattern)
+        if _np is not None and (_SentenceTransformer is not None or _USE_API_FALLBACK):
+            return
 
-    try:
-        import faiss
-        _faiss = faiss
-        _HAS_FAISS = True
-    except ImportError:
-        _HAS_FAISS = False
-        print("WARNING: faiss not available — using numpy fallback for vector search")
+        import numpy as np
+        _np = np
 
-    try:
-        from sentence_transformers import SentenceTransformer
-        _SentenceTransformer = SentenceTransformer
-    except Exception as e:
-        _SentenceTransformer = None
-        _USE_API_FALLBACK = True
-        print(f"WARNING: sentence-transformers failed to import: {e}")
-        print("         Will use HuggingFace Inference API for embeddings.")
+        try:
+            import faiss
+            _faiss = faiss
+            _HAS_FAISS = True
+        except ImportError:
+            _HAS_FAISS = False
+            print("WARNING: faiss not available — using numpy fallback for vector search")
+
+        try:
+            from sentence_transformers import SentenceTransformer
+            _SentenceTransformer = SentenceTransformer
+        except Exception as e:
+            _SentenceTransformer = None
+            _USE_API_FALLBACK = True
+            print(f"WARNING: sentence-transformers failed to import: {e}")
+            print("         Will use HuggingFace Inference API for embeddings.")
 
 
 # ─── HuggingFace Inference API fallback for embeddings ───
 
-_HF_EMBED_URL = "https://router.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+# Use BGE model which returns actual embeddings via HF router
+_HF_EMBED_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-small-en-v1.5"
 
 
 def _get_hf_headers() -> dict:
@@ -77,11 +87,12 @@ def _get_hf_headers() -> dict:
 
 
 def _embed_via_api(texts: list[str]) -> list:
-    """Get embeddings via HuggingFace Inference API (fallback)."""
+    """Get embeddings via HuggingFace Inference API (fallback).
+    Uses BAAI/bge-small-en-v1.5 which returns proper embedding vectors."""
     _ensure_numpy()
     headers = _get_hf_headers()
 
-    # HF feature-extraction pipeline accepts a list of strings
+    # HF models endpoint accepts a list of strings as inputs
     payload = {"inputs": texts, "options": {"wait_for_model": True}}
 
     for attempt in range(3):
@@ -94,6 +105,7 @@ def _embed_via_api(texts: list[str]) -> list:
             )
             if response.status_code == 200:
                 embeddings = response.json()
+                # Response is a list of lists (one embedding per input text)
                 return _np.array(embeddings, dtype="float32")
 
             if response.status_code in (503, 429):
@@ -103,8 +115,12 @@ def _embed_via_api(texts: list[str]) -> list:
                 time.sleep(wait)
                 continue
 
-            # Other error
+            # Other error — log and retry
             print(f"[embed-api] HTTP {response.status_code}: {response.text[:200]}")
+            if attempt < 2:
+                import time
+                time.sleep(2)
+                continue
             break
 
         except _requests.exceptions.Timeout:
@@ -162,18 +178,30 @@ def _encode(texts: list[str]):
 def compute_similarity(text_a: str, text_b: str) -> float:
     """
     Compute cosine similarity between two texts.
+    Returns a fallback value of 0.5 if embedding fails, rather than crashing.
 
     Returns:
         Similarity score between 0 and 1
     """
-    _ensure_numpy()
-    embeddings = _encode([text_a, text_b])
+    try:
+        _ensure_numpy()
+        embeddings = _encode([text_a, text_b])
 
-    a = embeddings[0]
-    b = embeddings[1]
-    similarity = _np.dot(a, b) / (_np.linalg.norm(a) * _np.linalg.norm(b))
+        a = embeddings[0]
+        b = embeddings[1]
+        norm_a = _np.linalg.norm(a)
+        norm_b = _np.linalg.norm(b)
 
-    return float(max(0.0, min(1.0, similarity)))
+        # Avoid division by zero
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+
+        similarity = _np.dot(a, b) / (norm_a * norm_b)
+        return float(max(0.0, min(1.0, similarity)))
+    except Exception as e:
+        print(f"[embedder] compute_similarity failed: {type(e).__name__}: {e}")
+        print("[embedder] Returning fallback similarity of 0.5")
+        return 0.5
 
 
 # ─── Numpy fallback for FAISS ───
